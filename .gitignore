@@ -1,0 +1,74 @@
+# ======================================================
+# 🧠 General Python
+# ======================================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pkl
+*.log
+*.tmp
+.DS_Store
+
+# ======================================================
+# 🧩 Virtual environments / package caches
+# ======================================================
+.env/
+.venv/
+venv/
+ENV/
+*.egg-info/
+pip-wheel-metadata/
+__pycache__/
+.cache/
+.wandb/
+wandb/
+
+# ======================================================
+# ⚙️ Model Checkpoints & LoRA / QLoRA outputs
+# ======================================================
+# Hugging Face / Transformers
+*.bin
+*.safetensors
+*.pt
+*.ckpt
+*.h5
+*.onnx
+
+# Adapter & LoRA weights
+adapter_model.bin
+adapter_model.safetensors
+adapter_config.json
+
+# Optimizer & Trainer artifacts
+optimizer.pt
+scheduler.pt
+trainer_state.json
+training_args.bin
+pytorch_model.bin
+pytorch_model.safetensors
+
+# ======================================================
+# 📦 Dataset / output directories
+# ======================================================
+/outputs/
+/logs/
+/runs/
+/checkpoints/
+/results/
+/evals/
+/tmp/
+/__pycache__/
+
+# ======================================================
+# 💾 Large experiment directories (optional)
+# ======================================================
+/weight-*/
+/model-*/
+/experiment-*/
+/lora-*/
+
+# ======================================================
+# 🧰 Jupyter / Colab
+# ======================================================
+.ipynb_checkpoints/
