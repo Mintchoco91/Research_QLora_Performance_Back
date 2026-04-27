@@ -8,7 +8,8 @@ from transformers import (
     EarlyStoppingCallback, 
     default_data_collator,
     DataCollatorWithPadding,
-    TrainerCallback
+    TrainerCallback,
+    DataCollatorForLanguageModeling
 )
 import math
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
@@ -19,15 +20,18 @@ import wandb
 from torch.nn import CrossEntropyLoss
 import time
 
+from datasets import concatenate_datasets
+import torch
+print("is_available ? :  ", torch.cuda.is_available())
 # ============================================================
 # ✅ 실험 데이터
 # ============================================================
 idx = 5
 weight = "1B"
 model_id = "meta-llama/Llama-3.2-" + weight
-isQLora = True  # ← LoRA로 바꾸려면 False로
-rank_val = 32
-alpha_val = 64
+isQLora = False  # ← LoRA로 바꾸려면 False로
+rank_val = 2
+alpha_val = 2
 Scaling_factor = float(alpha_val/rank_val)
 
 
@@ -64,29 +68,43 @@ def print_trainable_parameters(model):
 # ✅ 1. 데이터 전처리 함수
 # ============================================================
 def tokenize_func(batch):
+    prompts = []
     texts = []
-    for instr, inp, out in zip(batch["instruction"], batch["input"], batch["output"]):
-        prompt = f"{instr}\n{inp}\nAnswer: " if inp else f"{instr}\nAnswer: "
-        text = prompt + out
 
-        # Dynamic padding
-        tokenized = tokenizer(
-            text,
-            truncation=True,
-            max_length=512,
-            padding="max_length",   # ✅ 고정 패딩
-            add_special_tokens=False
-        )
+    for instruction, user_input, out in zip(
+        batch["instruction"], batch["input"], batch["output"]
+    ):
+        prompt = f"""### Instruction:
+{instruction}
 
-        # Mask prompt tokens (-100)
-        labels_ids = tokenized["input_ids"].copy()
-        prompt_len = len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
-        labels_ids[:prompt_len] = [-100] * prompt_len
-        tokenized["labels"] = labels_ids
-        texts.append(tokenized)
+### Input:
+{user_input}
 
-    # Batchify
-    return {k: [dic[k] for dic in texts] for k in texts[0]}
+### Response:
+"""
+        prompts.append(prompt)
+        texts.append(prompt + out + tokenizer.eos_token)
+
+    tokenized = tokenizer(
+        texts,
+        truncation=True,
+        max_length=128,
+        padding=True,
+        add_special_tokens=False
+    )
+
+    labels = []
+    for i in range(len(texts)):
+        input_ids = tokenized["input_ids"][i]
+        prompt_ids = tokenizer(prompts[i], add_special_tokens=False)["input_ids"]
+
+        label = input_ids.copy()
+        label[:len(prompt_ids)] = [-100] * len(prompt_ids)
+        labels.append(label)
+
+    tokenized["labels"] = labels
+
+    return tokenized
 
 # ============================================================
 # ✅ Perplexity
@@ -164,14 +182,15 @@ else:
     )
     optim_type = "adamw_torch"
 
-output_dir_name = "./result/weight-"+ str(weight) + "-rank-" + str(rank_val) + "-alpha-" + str(alpha_val) + "-qlora-" + str(isQLora)
+output_dir_name = "../result/weight-"+ str(weight) + "-rank-" + str(rank_val) + "-alpha-" + str(alpha_val) + "-qlora-" + str(isQLora)
 
 
 # ============================================================
 # ✅ 3. LoRA 설정
 # ============================================================
 model = prepare_model_for_kbit_training(model)
-model.gradient_checkpointing_enable()
+#속도 절감
+#model.gradient_checkpointing_enable()
 model.config.use_cache = False
 model.config.pad_token_id = tokenizer.pad_token_id
 model.config.eos_token_id = tokenizer.eos_token_id
@@ -181,21 +200,11 @@ lora_config = LoraConfig(
     r=rank_val,
     lora_alpha=alpha_val,
     target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.1,
+    lora_dropout=0.05,
     bias="none",
     task_type="CAUSAL_LM"
 )
 
-'''backup
-lora_config = LoraConfig(
-    r=32,
-    lora_alpha=64,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj"],
-    lora_dropout=0.1,
-    bias="none",
-    task_type="CAUSAL_LM"
-)
-'''
 model = get_peft_model(model, lora_config)
 
 # 4️⃣ 파라미터 계산
@@ -209,15 +218,17 @@ model.print_trainable_parameters()
 dataset = load_dataset(
     "json",
     data_files={
-        "train": "./train_data/train.jsonl",
+        "train": "../train_data/api_train.jsonl",
         #"train": "./train_data/custom_train.jsonl",
-        "test": "./train_data/eval.jsonl"
+        "test": "../train_data/eval.jsonl"
     }
 )
 
 # ✅ 여기서 샘플 개수 줄이기 (sanity check용)
 #dataset["train"] = dataset["train"].select(range(100))   # 훈련 데이터 8개만
 #dataset["test"]  = dataset["test"].select(range(2))    # 평가 데이터 2개만
+#dataset["train"] = concatenate_datasets([dataset["train"]] * 3)
+dataset["train"] = dataset["train"].shuffle(seed=42)
 
 
 tokenized_train = dataset["train"].map(
@@ -239,9 +250,9 @@ tokenized_eval = dataset["test"].map(
 training_args = TrainingArguments(
     # ⚙️ 기본 학습 설정
     per_device_train_batch_size = 1,       # 8GB VRAM 안전선
-    gradient_accumulation_steps = 4,       # 실효 배치 4 → 안정적 수렴
-    num_train_epochs = 2,                  # ✅ 3 → 2로 줄임 (과적합 방지)
-    learning_rate = 2e-4,                  # ✅ 2e-4 → 1e-4로 완화 (loss 급락 억제)
+    gradient_accumulation_steps = 2,       # 실효 배치 4 → 안정적 수렴
+    num_train_epochs = 5,                  # ✅ 3 → 2로 줄임 (과적합 방지)
+    learning_rate = 3e-5,                  # ✅ 2e-4 → 1e-4로 완화 (loss 급락 억제)
 
     # 🔄 스케줄 및 최적화
     warmup_ratio = 0.05,                   # ✅ 0.03 → 0.05로 상승 (초반 안정성 강화)
@@ -255,7 +266,7 @@ training_args = TrainingArguments(
     bf16 = False,                          # RTX 30 시리즈 미지원
 
     # 🧾 로깅 & 저장
-    logging_steps = 20,
+    logging_steps = 100,
     save_strategy = "epoch",               # 에폭 단위 저장
     eval_strategy = "epoch",               # 에폭 단위 평가
     save_total_limit = 3,                  # 최대 3개 체크포인트 유지
@@ -274,7 +285,10 @@ optimizer = AdamW(
 )
 
 # ✅ collator 변경 (labels 유지)
-data_collator = default_data_collator
+data_collator = DataCollatorForLanguageModeling(
+    tokenizer=tokenizer,
+    mlm=False
+)
 
 trainer = Trainer(
     model=model,
@@ -282,9 +296,9 @@ trainer = Trainer(
     train_dataset=tokenized_train,
     eval_dataset=tokenized_eval,
     tokenizer=tokenizer,
-    data_collator=data_collator,
+    data_collator= data_collator,
     optimizers=(optimizer, None),
-    callbacks=[EarlyStoppingCallback(early_stopping_patience=3), VRAMLoggingCallback()]
+    callbacks=[VRAMLoggingCallback()]
 )
 
 
@@ -330,8 +344,8 @@ wandb.log({"Reserve_VRAM_Peak_MB": reserve_vram_peak})
 # ============================================================
 # ✅ 7. 모델 저장
 # ============================================================
-trainer.model.save_pretrained("./llama-3.2-1b-lora")
-tokenizer.save_pretrained("./llama-3.2-1b-lora")
+trainer.model.save_pretrained("../llama-3.2-1b-lora")
+tokenizer.save_pretrained("../llama-3.2-1b-lora")
 
 print("Last checkpoint:", trainer.state.best_model_checkpoint)
 print("Output directory:", training_args.output_dir)
